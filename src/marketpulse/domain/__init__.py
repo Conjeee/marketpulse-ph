@@ -1,1 +1,1 @@
-from models import Ticker
+from .models import Ticker
