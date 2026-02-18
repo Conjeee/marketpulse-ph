@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import yfinance as yf
+import random
 import feedparser
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -29,7 +30,7 @@ def _get_yfinance_price(ticker_value: str) -> float:
     """
     
     stock = yf.Ticker(ticker_value)
-    hist = stock.history(period="1d")
+    hist = stock.history(period="7d")
     
     if hist.empty:
         raise ValueError(f"No price data found for {ticker_value}")
@@ -37,7 +38,7 @@ def _get_yfinance_price(ticker_value: str) -> float:
     return float(hist["Close"].iloc[-1])
 
 
-async def fetch_price(ticker: Ticker) -> float | None:
+async def fetch_price(ticker: Ticker, semaphore: asyncio.Semaphore) -> float | None:
     """
     Uses _get_yfinance_price to scrape price from yfinance and runs it in the background thread
     
@@ -47,25 +48,27 @@ async def fetch_price(ticker: Ticker) -> float | None:
     :rtype: float | None
     """
     
-    try:
-        price = await asyncio.to_thread(_get_yfinance_price, ticker.value)
+    async with semaphore:
+        await asyncio.sleep(random.uniform(0.1, 1.5))
+        try:
+            price = await asyncio.to_thread(_get_yfinance_price, ticker.value)
+            
+            logger.info("status", 
+                        level="INFO", 
+                        ticker=ticker.name, 
+                        action="fetch_price", 
+                        status="success"
+                        )
+            return price
         
-        logger.info("status", 
-                    level="INFO", 
-                    ticker=ticker.name, 
-                    action="fetch_price", 
-                    status="success"
-                    )
-        return price
-    
-    except Exception as e:
-        logger.error("status", 
-                     level="ERROR", 
-                     ticker=ticker.name, 
-                     action="fetch_price", 
-                     error=type(e).__name__
-                     )
-        return None
+        except Exception as e:
+            logger.error("status", 
+                        level="ERROR", 
+                        ticker=ticker.name, 
+                        action="fetch_price", 
+                        error=type(e).__name__
+                        )
+            return None
     
 
 @retry_policy
@@ -114,7 +117,7 @@ async def fetch_news(session: aiohttp.ClientSession, ticker: Ticker) -> str | No
         return None
     
 
-async def process_ticker(session: aiohttp.ClientSession, ticker: Ticker) -> dict:
+async def process_ticker(session: aiohttp.ClientSession, ticker: Ticker, semaphore: asyncio.Semaphore) -> dict:
     """
     Gathers price task and news task and returns a dictionary of information
 
@@ -126,7 +129,7 @@ async def process_ticker(session: aiohttp.ClientSession, ticker: Ticker) -> dict
         dict: Ticker, latest closing price, and latest headline
     """
     
-    price_task = fetch_price(ticker)
+    price_task = fetch_price(ticker, semaphore)
     news_task = fetch_news(session, ticker)
     
     price, news = await asyncio.gather(price_task, news_task)
@@ -144,8 +147,10 @@ async def run_ingestion() -> list[dict]:
     Returns:
         list[dict]: Ticker code, price and, headline of every stock ticker in Ticker
     """
-
-    async with aiohttp.ClientSession() as session:
-        tasks = [process_ticker(session, ticker) for ticker in Ticker]
+    yf_semaphore = asyncio.Semaphore(3)
+    connector = aiohttp.TCPConnector(ssl=False)
+    
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = [process_ticker(session, ticker, yf_semaphore) for ticker in Ticker]
         results = await asyncio.gather(*tasks)
         return results
