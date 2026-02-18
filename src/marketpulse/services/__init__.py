@@ -1,0 +1,1 @@
+from .ingestor import run_ingestion
